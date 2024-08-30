@@ -259,7 +259,7 @@ class Config:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Time-Based SQL Injection Tester")
-    parser.add_argument("url", help="Target URL")
+    parser.add_argument("--url", required=True, help="Target URL")
     parser.add_argument("--sleep-time", type=int, default=10, help="Sleep time for the payload")
     parser.add_argument("--delay", type=float, default=1, help="Delay between requests")
     parser.add_argument("--timeout", type=int, default=10, help="Request timeout")
