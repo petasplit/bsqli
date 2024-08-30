@@ -217,7 +217,6 @@ class AdvancedSQLiTester:
                 print(f"{Fore.RED}❌ Error. URL: {result['url']} - Error: {result['error']}")
             else:
                 print(f"{Fore.RED}❌ Not Vulnerable. URL: {result['url']} - Response Time: {result['response_time']:.2f}s - Status: {result['status_code']}")
-{result['response_time']:.2f}s - Status: {result['status_code']}")
 
     def save_results(self):
         if not self.config.output:
