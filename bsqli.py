@@ -64,32 +64,67 @@ class TimeBasedSQLiTester:
 
     def test_payload(self, url, payload):
         try:
-            # Parse the base URL
-            parsed_url = urlparse(url)
-            query = parse_qs(parsed_url.query)
-            # Append the payload as a query parameter
-            query['payload'] = payload
-            encoded_query = urlencode(query, doseq=True)
-            full_url = parsed_url._replace(query=encoded_query).geturl()
-            
-            start_time = time.time()
-            r = requests.get(full_url, cookies=self.config.cookies, headers={'User-Agent': self.config.user_agent}, proxies=self.config.proxies, timeout=self.config.timeout)
-            response_time = time.time() - start_time
-            vulnerable = response_time > self.config.sleep_time
-            
-            with self.lock:
-                self.results.append({
-                    'url': full_url,
-                    'payload': payload,
-                    'vulnerable': vulnerable,
-                    'response_time': response_time,
-                    'status_code': r.status_code,
-                    'content_length': len(r.content)
-                })
-        except requests.exceptions.RequestException as e:
-            print(f"Request to {url} failed: {e}")
+            # Generate URL variations
+            urls_to_test = self.generate_url_variations(url, payload)
+
+            for full_url in urls_to_test:
+                try:
+                    # Prepare the request with different payload placements
+                    self.send_request(full_url, payload)
+                except requests.exceptions.RequestException as e:
+                    print(f"Request to {full_url} failed: {e}")
         except Exception as e:
             print(f"An error occurred: {e}")
+
+    def generate_url_variations(self, url, payload):
+        variations = []
+        parsed_url = urlparse(url)
+        path_parts = parsed_url.path.strip('/').split('/')
+        
+        # Insert payload in various parts of the path
+        for i in range(len(path_parts) + 1):
+            new_path = '/'.join(path_parts[:i] + [payload] + path_parts[i:])
+            variations.append(urljoin(url, parsed_url._replace(path=new_path).geturl()))
+        
+        # Insert payload in the query string
+        query = parse_qs(parsed_url.query)
+        query['payload'] = payload
+        encoded_query = urlencode(query, doseq=True)
+        variations.append(parsed_url._replace(query=encoded_query).geturl())
+
+        return variations
+
+    def send_request(self, url, payload):
+        start_time = time.time()
+
+        # Prepare the request
+        headers = self.config.headers.copy()
+        headers['User-Agent'] = headers.get('User-Agent', '') + payload
+        
+        cookies = self.config.cookies.copy()
+        cookies['payload'] = payload
+
+        body = self.config.json_body.copy()
+        if body:
+            body['payload'] = payload
+
+        try:
+            r = requests.get(url, cookies=cookies, headers=headers, proxies=self.config.proxies, timeout=self.config.timeout)
+        except requests.exceptions.RequestException:
+            r = requests.post(url, json=body, headers=headers, cookies=cookies, proxies=self.config.proxies, timeout=self.config.timeout)
+
+        response_time = time.time() - start_time
+        vulnerable = response_time > self.config.sleep_time
+
+        with self.lock:
+            self.results.append({
+                'url': url,
+                'payload': payload,
+                'vulnerable': vulnerable,
+                'response_time': response_time,
+                'status_code': r.status_code,
+                'content_length': len(r.content)
+            })
 
     def run(self):
         urls_to_test = [self.config.url] if not self.config.crawl else self.crawl(self.config.url)
@@ -210,6 +245,8 @@ class Config:
         self.user_agent = args.user_agent
         self.cookies = {}
         self.proxies = {}
+        self.headers = {'User-Agent': args.user_agent}
+        self.json_body = {}
         self.crawl = args.crawl
         self.generate_csv = args.generate_csv
         self.generate_json = args.generate_json
@@ -221,13 +258,13 @@ class Config:
             raise ValueError("Invalid URL format")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Advanced Time-Based SQL Injection Testing Tool")
-    parser.add_argument("-u", "--url", required=True, help="Target URL")
-    parser.add_argument("-t", "--sleep-time", type=int, default=5, help="Time to sleep for detection (in seconds)")
-    parser.add_argument("-d", "--delay", type=float, default=1.0, help="Delay between requests (in seconds)")
-    parser.add_argument("-to", "--timeout", type=float, default=10.0, help="Request timeout (in seconds)")
-    parser.add_argument("-ua", "--user-agent", default="Mozilla/5.0 (Windows NT 10.0; Win64; x64)", help="User-Agent header")
-    parser.add_argument("-c", "--crawl", action="store_true", help="Crawl the website for more URLs")
+    parser = argparse.ArgumentParser(description="Time-Based SQL Injection Tester")
+    parser.add_argument("url", help="Target URL")
+    parser.add_argument("--sleep-time", type=int, default=10, help="Sleep time for the payload")
+    parser.add_argument("--delay", type=float, default=1, help="Delay between requests")
+    parser.add_argument("--timeout", type=int, default=10, help="Request timeout")
+    parser.add_argument("--user-agent", default="SQLiTester", help="User-Agent header")
+    parser.add_argument("--crawl", action="store_true", help="Crawl the website for URLs")
     parser.add_argument("--generate-csv", action="store_true", help="Generate CSV report")
     parser.add_argument("--generate-json", action="store_true", help="Generate JSON report")
     parser.add_argument("--generate-html", action="store_true", help="Generate HTML report")
@@ -243,3 +280,4 @@ if __name__ == "__main__":
         print(f"Input validation error: {ve}")
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
+
